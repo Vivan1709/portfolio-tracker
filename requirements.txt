@@ -3,3 +3,5 @@ pandas
 yfinance
 requests
 beautifulsoup4
+fpdf2
+feedparser
