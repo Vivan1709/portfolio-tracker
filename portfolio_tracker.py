@@ -1,150 +1,130 @@
-# portfolio_tracker.py
-
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 import requests
-import datetime
-import os
+from datetime import datetime
 from fpdf import FPDF
-from bs4 import BeautifulSoup
+import os
+import re
 
-# Create reports directory
-if not os.path.exists("reports"):
-    os.makedirs("reports")
+# ------------------ Data Storage ------------------
 
-# ---------------------------
-# Helper: Fetch stock data
-# ---------------------------
-def get_stock_info(symbol):
-    stock = yf.Ticker(symbol)
-    info = stock.info
-    return {
-        "Current Price": info.get("currentPrice"),
-        "Market Cap": info.get("marketCap"),
-        "PE Ratio": info.get("trailingPE"),
-        "Profit Margin": info.get("profitMargins"),
-        "Return on Equity": info.get("returnOnEquity"),
-    }
+if "portfolio" not in st.session_state:
+    st.session_state["portfolio"] = []
 
-# ---------------------------
-# Helper: News Insights
-# ---------------------------
-def scrape_moneycontrol():
+# ------------------ Helper Functions ------------------
+
+def fetch_stock_data(symbol):
     try:
-        url = "https://www.moneycontrol.com/news/business/markets/"
-        r = requests.get(url)
-        soup = BeautifulSoup(r.content, 'html.parser')
-        headlines = [a.text.strip() for a in soup.select(".clearfix a") if a.text.strip() != ""]
-        return headlines[:5]
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        return {
+            "name": info.get("shortName", symbol),
+            "price": info.get("currentPrice", 0),
+            "pe_ratio": info.get("trailingPE", None),
+            "market_cap": info.get("marketCap", None),
+            "opm": info.get("operatingMargins", None),
+        }
     except:
-        return ["Could not fetch Moneycontrol news"]
+        return None
 
-def scrape_etmarkets():
-    try:
-        url = "https://economictimes.indiatimes.com/markets"
-        r = requests.get(url)
-        soup = BeautifulSoup(r.content, 'html.parser')
-        headlines = [a.text.strip() for a in soup.select("h3") if a.text.strip() != ""]
-        return headlines[:5]
-    except:
-        return ["Could not fetch ETMarkets news"]
+def clean_text(text):
+    return re.sub(r'[^\x00-\x7F]+', ' ', text)
 
-def scrape_sebi_press():
-    try:
-        url = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=9&smid=0&cid=0&type=Listing"
-        r = requests.get(url)
-        soup = BeautifulSoup(r.content, 'html.parser')
-        headlines = [a.text.strip() for a in soup.select(".col-sm-9 a") if a.text.strip() != ""]
-        return headlines[:5]
-    except:
-        return ["Could not fetch SEBI updates"]
-
-# ---------------------------
-# PDF Generator
-# ---------------------------
 def generate_pdf_report():
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
-    date_today = datetime.datetime.now().strftime("%Y-%m-%d")
-
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(200, 10, txt=f"Daily Market Report - {date_today}", ln=True, align='C')
+    pdf.cell(200, 10, txt=f"Market Insights Report - {datetime.now().strftime('%Y-%m-%d')}", ln=True, align='C')
 
     pdf.ln(10)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 10, txt="Moneycontrol Top Headlines:", ln=True)
-    for headline in scrape_moneycontrol():
-        pdf.set_font("Arial", size=11)
-        pdf.multi_cell(0, 8, txt=f"- {headline}")
+    pdf.set_font("Arial", size=10)
+    pdf.cell(200, 10, txt="Twitter/Reddit News:", ln=True)
 
-    pdf.ln(5)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 10, txt="ETMarkets Top Headlines:", ln=True)
-    for headline in scrape_etmarkets():
-        pdf.set_font("Arial", size=11)
-        pdf.multi_cell(0, 8, txt=f"- {headline}")
+    social = []
+    try:
+        h = requests.get("https://www.reddit.com/r/IndianStockMarket/top.json?limit=5", headers={"User-agent": "Mozilla"})
+        for p in h.json().get('data', {}).get('children', []):
+            social.append(p['data']['title'])
+    except:
+        social.append("Unable to fetch Reddit headlines.")
 
-    pdf.ln(5)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 10, txt="SEBI Press Releases:", ln=True)
-    for headline in scrape_sebi_press():
-        pdf.set_font("Arial", size=11)
-        pdf.multi_cell(0, 8, txt=f"- {headline}")
+    try:
+        t = requests.get("https://api.thenewsapi.com/v1/news/all?api_token=demo&language=en&limit=5")
+        for article in t.json().get("data", []):
+            social.append(article["title"])
+    except:
+        social.append("Unable to fetch Twitter/news headlines.")
 
-    filename = f"reports/Market_Report_{date_today}.pdf"
+    for headline in social:
+        pdf.multi_cell(0, 8, txt=f"- {clean_text(headline)}")
+
+    filename = f"global_market_report.pdf"
     pdf.output(filename)
     return filename
 
-# ---------------------------
-# Streamlit UI
-# ---------------------------
-st.set_page_config(page_title="Client Portfolio Tracker", layout="wide")
-st.title("📊 Client Portfolio Tracker")
+# ------------------ UI ------------------
 
-portfolio_data = []
+st.title("📊 Custom Portfolio Tracker for Indian Stocks")
 
 with st.sidebar:
-    st.header("Add New Stock")
-    symbol = st.text_input("Stock Symbol (NSE)", value="RELIANCE.NS")
-    purchase_price = st.number_input("Purchase Price", step=0.01)
-    quantity = st.number_input("Quantity", step=1)
-    if st.button("Add to Portfolio"):
-        info = get_stock_info(symbol)
-        total_value = quantity * info['Current Price'] if info['Current Price'] else 0
-        portfolio_data.append({
-            "Symbol": symbol,
-            "Quantity": quantity,
-            "Purchase Price": purchase_price,
-            "Current Price": info['Current Price'],
-            "Market Cap": info['Market Cap'],
-            "PE Ratio": info['PE Ratio'],
-            "Profit Margin": info['Profit Margin'],
-            "ROE": info['Return on Equity'],
-            "Total Value": total_value
+    st.header("Add a Stock")
+    name = st.text_input("Stock Symbol (e.g., RELIANCE.NS)")
+    buy_price = st.number_input("Buy Price", min_value=0.0, step=0.1)
+    quantity = st.number_input("Quantity", min_value=1, step=1)
+    if st.button("Add Stock") and name:
+        st.session_state.portfolio.append({
+            "symbol": name.upper(),
+            "buy_price": buy_price,
+            "quantity": quantity
         })
 
     st.markdown("---")
-    uploaded_file = st.file_uploader("Or Upload Portfolio CSV", type=["csv"])
-    if uploaded_file is not None:
-        df_uploaded = pd.read_csv(uploaded_file)
-        st.session_state['portfolio_df'] = df_uploaded
+    csv_upload = st.file_uploader("Or Upload CSV", type=["csv"])
+    if csv_upload:
+        df = pd.read_csv(csv_upload)
+        for _, row in df.iterrows():
+            st.session_state.portfolio.append({
+                "symbol": row['symbol'].upper(),
+                "buy_price": row['buy_price'],
+                "quantity": row['quantity']
+            })
 
-# Display portfolio
-if 'portfolio_df' not in st.session_state:
-    df = pd.DataFrame(portfolio_data)
-else:
-    df = st.session_state['portfolio_df']
+# ------------------ Display Portfolio ------------------
+
+portfolio_data = []
+for entry in st.session_state.portfolio:
+    stock_info = fetch_stock_data(entry["symbol"])
+    if stock_info:
+        invested = entry["buy_price"] * entry["quantity"]
+        market_value = stock_info["price"] * entry["quantity"]
+        portfolio_data.append({
+            "Symbol": entry["symbol"],
+            "Name": stock_info["name"],
+            "Buy Price": entry["buy_price"],
+            "Current Price": stock_info["price"],
+            "Quantity": entry["quantity"],
+            "Invested": invested,
+            "Market Value": market_value,
+            "P/E Ratio": stock_info["pe_ratio"],
+            "Market Cap": stock_info["market_cap"],
+            "OPM%": stock_info["opm"]
+        })
+
+df = pd.DataFrame(portfolio_data)
 
 if not df.empty:
-    st.subheader("Portfolio Summary")
+    st.subheader("📁 Portfolio Overview")
     st.dataframe(df)
-    st.write(f"Total Portfolio Value: ₹{df['Total Value'].sum():,.2f}")
 
-# Generate PDF
-st.markdown("---")
-if st.button("📄 Generate Daily Market Insights PDF"):
+    total_invested = df["Invested"].sum()
+    total_market = df["Market Value"].sum()
+    st.metric("Total Invested", f"₹{total_invested:,.2f}")
+    st.metric("Current Market Value", f"₹{total_market:,.2f}")
+
+# ------------------ Report Generation ------------------
+
+if st.button("📄 Generate Daily Market PDF Report"):
     pdf_path = generate_pdf_report()
     with open(pdf_path, "rb") as f:
-        st.download_button("Download Market Report PDF", f, file_name=os.path.basename(pdf_path))
+        st.download_button("Download PDF Report", data=f, file_name=pdf_path, mime="application/pdf")
