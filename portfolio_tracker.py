@@ -22,4 +22,4 @@ if uploaded_file:
     client_df = df[df['client'] == selected_client]
 
     # Group transactions
-    summary =
+    summary = {}
