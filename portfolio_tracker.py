@@ -4,194 +4,153 @@ import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
 from fpdf import FPDF
-import os
-import openai
 from datetime import datetime
+import json
 
-# --- Configuration ---
-st.set_page_config(page_title="Portfolio & Market Intelligence", layout="wide")
-st.title("📊 Indian Stock Portfolio Tracker & Market Intelligence Hub")
+# --- Streamlit App Setup ---
+st.set_page_config(page_title="Market Intelligence Platform", layout="wide")
+st.title("📊 Indian Stock Portfolio & Market Intelligence Hub")
 
-# Load OpenAI Key (add to Streamlit Secrets as OPENAI_API_KEY)
-openai.api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-
-# Ensure PDF directory exists
-PDF_DIR = "pdfs"
-os.makedirs(PDF_DIR, exist_ok=True)
-
-# --- Session State for Manual Entries ---
+# --- Session State for Trades ---
 if 'manual_entries' not in st.session_state:
-    st.session_state.manual_entries = pd.DataFrame(
-        columns=["client", "stock", "action", "qty", "price", "date"]
-    )
+    st.session_state.manual_entries = pd.DataFrame(columns=["client","stock","action","qty","price","date"])
 
-# --- Trade Data Input ---
-st.subheader("1. Import Trade History")
-col1, col2 = st.columns(2)
-with col1:
-    uploaded_file = st.file_uploader("Upload CSV of trades", type="csv")
-    if uploaded_file:
-        df_csv = pd.read_csv(uploaded_file)
-    else:
-        df_csv = pd.DataFrame(columns=["client", "stock", "action", "qty", "price", "date"])
-with col2:
-    st.write("**Or enter trades manually**")
-    with st.form("manual_trade_form", clear_on_submit=True):
-        client = st.text_input("Client Name")
-        stock = st.text_input("Stock Symbol (e.g., INFY)")
-        action = st.selectbox("Action", ["buy", "sell"])
-        qty = st.number_input("Quantity", min_value=1, step=1)
-        price = st.number_input("Price per Share", min_value=0.0, step=0.01)
-        date = st.date_input("Trade Date")
-        submitted = st.form_submit_button("Add Trade")
-        if submitted:
-            new = pd.DataFrame([{"client": client.strip(), "stock": stock.strip().upper(),
-                                  "action": action, "qty": qty, "price": price, "date": date}])
-            st.session_state.manual_entries = pd.concat(
-                [st.session_state.manual_entries, new], ignore_index=True
-            )
-            st.success("Trade added!")
+# --- CSV Upload ---
+st.sidebar.header("Import Trades")
+uploaded_file = st.sidebar.file_uploader("Upload trade CSV", type=["csv"])
+if uploaded_file:
+    df_csv = pd.read_csv(uploaded_file)
+else:
+    df_csv = pd.DataFrame(columns=["client","stock","action","qty","price","date"])
 
-# Combine CSV and manual entries
-df_all = pd.concat([df_csv, st.session_state.manual_entries], ignore_index=True)
-if df_all.empty:
-    st.warning("No trade data. Upload CSV or add trades.")
+# --- Manual Trade Form ---
+st.sidebar.header("Add Trade Manually")
+with st.sidebar.form("manual_trade_form"):
+    client = st.text_input("Client Name")
+    stock = st.text_input("Stock Symbol (e.g., TCS)")
+    action = st.selectbox("Action", ["buy","sell"])
+    qty = st.number_input("Quantity", min_value=1)
+    price = st.number_input("Price/share", min_value=0.0, format="%.2f")
+    date = st.date_input("Trade Date")
+    submitted = st.form_submit_button("Add Trade")
+    if submitted:
+        entry = pd.DataFrame([{"client":client.strip(),"stock":stock.strip().upper(),"action":action,"qty":qty,"price":price,"date":date}])
+        st.session_state.manual_entries = pd.concat([st.session_state.manual_entries, entry], ignore_index=True)
+        st.success("Trade added.")
+
+# --- Combine Trades ---
+all_trades = pd.concat([df_csv, st.session_state.manual_entries], ignore_index=True)
+if all_trades.empty:
+    st.info("No trades. Upload CSV or add manually.")
     st.stop()
 
-# --- Portfolio View ---
-st.subheader("2. Portfolio Overview")
-clients = df_all['client'].unique().tolist()
+# --- Client Selection ---
+clients = all_trades['client'].unique().tolist()
 selected_client = st.selectbox("Select Client", clients)
-client_df = df_all[df_all['client'] == selected_client]
+client_df = all_trades[all_trades['client']==selected_client]
 
-# Summarize holdings
+# --- Compute Portfolio Summary ---
 summary = {}
-for _, r in client_df.iterrows():
-    sym = r['stock']
-    qty = r['qty']
-    cost = r['price']
-    act = r['action'].lower()
-    if sym not in summary:
-        summary[sym] = {'qty': 0, 'invested': 0}
-    if act == 'buy': summary[sym]['qty'] += qty; summary[sym]['invested'] += qty * cost
-    else: summary[sym]['qty'] -= qty; summary[sym]['invested'] -= qty * cost
+for _, row in client_df.iterrows():
+    sym = row['stock']
+    key = sym + ".NS"
+    qty, price, act = row['qty'], row['price'], row['action']
+    summary.setdefault(sym, {'qty':0,'invested':0})
+    if act == 'buy': summary[sym]['qty'] += qty; summary[sym]['invested'] += qty*price
+    else: summary[sym]['qty'] -= qty; summary[sym]['invested'] -= qty*price
 
-# Build DataFrame
-data = []
+# --- Build Holdings Table & identify large caps ---
+threshold = 500 * 1e7  # ₹500 Cr
+df_hold = []
+large_names = []
 for sym, info in summary.items():
-    ticker = yf.Ticker(sym + ".NS")
-    info_data = ticker.info
-    live = info_data.get('regularMarketPrice', 0)
-    pe = info_data.get('trailingPE', 'N/A')
-    mc = info_data.get('marketCap', 'N/A')
-    opm = info_data.get('operatingMargins', 'N/A')
-    de = info_data.get('debtToEquity', 'N/A')
-
-    mv = info['qty'] * live
-    pnl = mv - info['invested']
-
-    data.append({
-        'Stock': sym,
-        'Qty': info['qty'],
-        'Invested ₹': round(info['invested'],2),
-        'CMP ₹': round(live,2),
-        'Market Cap ₹': mc,
-        'P/E': pe,
-        'OPM%': f"{round(opm*100,2)}%" if isinstance(opm,float) else opm,
-        'D/E': de,
-        'Market Value ₹': round(mv,2),
-        'Gain/Loss ₹': round(pnl,2)
+    if info['qty']==0: continue
+    ticker = yf.Ticker(sym+".NS")
+    data = ticker.info
+    live = data.get('currentPrice',0)
+    mcap = data.get('marketCap',0)
+    mv = live * info['qty']
+    gain = mv - info['invested']
+    long_name = data.get('longName','')
+    if mcap>threshold and long_name:
+        large_names.append(long_name)
+    df_hold.append({
+        'Stock':sym,'Qty':info['qty'],'Invested ₹':round(info['invested'],2),
+        'CMP ₹':round(live,2),'Market Value ₹':round(mv,2),'Gain/Loss ₹':round(gain,2),
+        'P/E':data.get('trailingPE','N/A'),'Market Cap':mcap,'OPM%':f"{round(data.get('operatingMargins',0)*100,2)}%",
+        'Debt/Equity':data.get('debtToEquity','N/A')
     })
 
-df_port = pd.DataFrame(data)
-st.dataframe(df_port, use_container_width=True)
+st.subheader(f"Portfolio Summary for {selected_client}")
+df_summary = pd.DataFrame(df_hold)
+st.dataframe(df_summary, use_container_width=True)
 
-# --- Detailed View ---
-st.subheader("3. Stock Deep Dive")
-stock_sel = st.selectbox("Select Stock for Details", df_port['Stock'])
-if stock_sel:
-    info = yf.Ticker(stock_sel + ".NS").info
-    st.json({k: info.get(k) for k in ['longName','sector','industry','regularMarketPrice',
-                                       'trailingPE','marketCap','operatingMargins','debtToEquity']})
+# --- Stock Details ---
+st.subheader("🔍 Stock Details & Quality Tags")
+sel = st.selectbox("Choose Stock", df_summary['Stock'])
+if sel:
+    row = df_summary[df_summary['Stock']==sel].iloc[0]
+    st.write(row.to_dict())
+    # Basic sentiment tag
+    tag = 'Neutral'
+    if row['Gain/Loss ₹']>0: tag='Bullish'
+    if row['Gain/Loss ₹']<0: tag='Bearish'
+    st.markdown(f"**Sentiment Tag:** {tag}")
 
-# --- SEBI Tracker ---
-st.subheader("4. SEBI Actions (>₹500 Cr Market Cap)")
-def get_sebi_actions():
-    url = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=3&smid=0&cid=0"
-    resp = requests.get(url)
-    soup = BeautifulSoup(resp.content,'html.parser')
-    items = soup.select(".listingInfo")
-    out=[]
+# --- SEBI Actions for Large Caps ---
+st.subheader("📢 SEBI Actions for Large Caps (>₹500Cr)")
+def fetch_sebi():
+    url="https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=1&smid=3"
+    res=requests.get(url)
+    soup=BeautifulSoup(res.text,'html.parser')
+    items=soup.select('.list li')
+    acts=[]
     for it in items:
-        title=it.select_one('a').text.strip()
-        link='https://www.sebi.gov.in'+it.select_one('a')['href']
-        date=it.select_one('.date').text.strip()
-        out.append(f"{date} - [{title}]({link})")
-    return out
+        title=it.get_text(strip=True)
+        link="https://www.sebi.gov.in"+it.find('a')['href']
+        for name in large_names:
+            if name.lower() in title.lower(): acts.append((title,link))
+    return acts
+acts = fetch_sebi()
+if acts:
+    for t,l in acts: st.markdown(f"- [{t}]({l})")
+else:
+    st.write("No recent SEBI actions for large-cap holdings.")
 
-sebi_actions = get_sebi_actions()
-for act in sebi_actions:
-    st.markdown(act)
+# --- Market Report PDF Generator ---
+st.subheader("📄 Market Insights Report")
+if st.button("Generate Market Insights PDF"):
+    # Scrape social & news
+    subs=['IndianStockMarket','stocks','economy']
+    social=[]
+    for sub in subs:
+        h=requests.get(f'https://www.reddit.com/r/{sub}/hot.json?limit=3',headers={'User-Agent':'Mozilla/5.0'})
+        for p in h.json().get('data',{}).get('children',[]): social.append(p['data']['title'])
+    # News RSS
+    feeds=[('MoneyControl','https://www.moneycontrol.com/rss/latestnews.xml'),
+           ('ET','https://economictimes.indiatimes.com/rssfeedstopstories.cms')]
+    news=[]
+    import feedparser
+    for name,url in feeds:
+        d=feedparser.parse(url)
+        for e in d.entries[:3]: news.append(f"[{name}] {e.title}")
+    # PDF creation
+    now=datetime.now().strftime('%d-%B-%Y')
+    fname=f"Market-Insights-{now}.pdf"
+    pdf=FPDF(); pdf.add_page(); pdf.set_font("Arial","B",16)
+    pdf.cell(0,10,f"Market Insights Report - {now}",ln=True,align='C')
+    pdf.ln(10); pdf.set_font("Arial","B",14); pdf.cell(0,8,"Social Media Trends",ln=True)
+    pdf.set_font("Arial","",12)
+    for s in social: pdf.multi_cell(0,6,f"- {s}")
+    pdf.ln(5); pdf.set_font("Arial","B",14); pdf.cell(0,8,"News Headlines",ln=True)
+    pdf.set_font("Arial","",12)
+    for n in news: pdf.multi_cell(0,6,f"- {n}")
+    pdf.ln(5); pdf.set_font("Arial","B",14); pdf.cell(0,8,"SEBI Actions",ln=True)
+    pdf.set_font("Arial","",12)
+    for t,l in acts: pdf.multi_cell(0,6,f"- {t} (Link: {l})")
+    out_path=f"reports/{fname}"
+    pdf.output(out_path)
+    st.success(f"PDF generated: {fname}")
+    with open(out_path,'rb') as f: st.download_button("Download PDF", f, file_name=fname)
 
-# --- Report Generator ---
-st.subheader("5. Generate Market Insights PDF")
-
-# Helpers for scraping news/social
-
-def scrape_reddit():
-    headers={'User-Agent':'Mozilla/5.0'}
-    url='https://www.reddit.com/r/IndianStockMarket/hot.json?limit=5'
-    try:
-        r=requests.get(url, headers=headers)
-        posts=r.json()['data']['children']
-        return [p['data']['title'] for p in posts]
-    except:
-        return []
-
-def scrape_moneycontrol():
-    try:
-        r=requests.get('https://www.moneycontrol.com/news/business', headers={'User-Agent':'Mozilla/5.0'})
-        soup=BeautifulSoup(r.text,'html.parser')
-        headlines=[h.text.strip() for h in soup.select('h2.headline')[:5]]
-        return headlines
-    except:
-        return []
-
-# PDF generation
-
-def generate_report():
-    date_str = datetime.now().strftime("%d-%b-%Y")
-    title=f"Market-Insights-{date_str}.pdf"
-    # Collect content
-    reddit=scrape_reddit()
-    mc=scrape_moneycontrol()
-    sebi=sebi_actions[:5]
-    content = f"Market Update - {date_str}\n\nTop Reddit Trends:\n" + "\n".join(reddit)
-    content += "\n\nTop MoneyControl Headlines:\n" + "\n".join(mc)
-    content += "\n\nRecent SEBI Actions:\n" + "\n".join(sebi)
-    # Summarize via GPT
-    prompt=(f"You are a market analyst. Summarize the following into key actionable insights.\n{content}")
-    try:
-        resp=openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role":"user","content":prompt}]
-        )
-        summary=resp.choices[0].message.content
-    except:
-        summary=content
-    # Create PDF
-    pdf=FPDF(); pdf.add_page(); pdf.set_font("Arial",size=12)
-    for line in summary.split("\n"):
-        pdf.multi_cell(0,8,line)
-    path=os.path.join(PDF_DIR,title)
-    pdf.output(path)
-    return title
-
-# Manual trigger
-if st.button("Generate Market Insights PDF Now"):
-    with st.spinner("Generating report..."):
-        fname=generate_report()
-        st.success(f"Report saved as {fname}")
-        st.markdown(f"[Download Report]({PDF_DIR}/{fname})")
-
-```
+# --- End of App ---
